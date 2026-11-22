@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'none'">
+  <title>ポモドーロタイマー</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      --background: #f9e7df;
+      --accent: #8e3425;
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 20px;
+      background: var(--background);
+      color: #292522;
+      font: 1rem/1.5 system-ui, sans-serif;
+    }
+    body.break { --background: #dff2e8; --accent: #1f6349; }
+    main {
+      width: min(100%, 490px);
+      padding: clamp(18px, 5vw, 34px);
+      border-radius: 24px;
+      background: #fffdfb;
+      box-shadow: 0 12px 40px #25221f15;
+      text-align: center;
+    }
+    h1 { margin: 0 0 22px; font-size: clamp(1.25rem, 5vw, 1.65rem); }
+    #phase { margin: 0; color: var(--accent); font-size: 1.2rem; font-weight: 700; }
+    .timer-face {
+      --progress: 100%;
+      position: relative;
+      display: grid;
+      place-content: center;
+      width: min(100%, 290px);
+      aspect-ratio: 1;
+      margin: 16px auto 0;
+      color: var(--accent);
+    }
+    .timer-face::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      border-radius: 50%;
+      background: conic-gradient(var(--accent) var(--progress), var(--background) 0);
+      mask-image: radial-gradient(farthest-side, transparent calc(100% - 7px), black calc(100% - 6px));
+    }
+    #remaining {
+      display: block;
+      font-size: clamp(2.5rem, 14vw, 5rem);
+      line-height: 1.15;
+      font-weight: 750;
+      font-variant-numeric: tabular-nums;
+    }
+    .timer-label { color: #554e49; }
+    #status { margin: 10px 0 18px; min-height: 1.5em; }
+    .controls, .settings, .sound { display: grid; gap: 8px; }
+    .controls { grid-template-columns: repeat(3, 1fr); }
+    .settings { grid-template-columns: repeat(2, minmax(0, 1fr)); margin-top: 12px; }
+    .sound { grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: center; }
+    button, input[type="number"] {
+      min-height: 46px;
+      border: 1px solid #c8beb7;
+      border-radius: 10px;
+      background: white;
+      color: inherit;
+      font: inherit;
+      text-align: center;
+    }
+    button { padding: 5px; cursor: pointer; font-weight: 700; }
+    button:disabled { opacity: .5; cursor: default; }
+    #start { color: white; border-color: var(--accent); background: var(--accent); }
+    input[type="number"] { width: 100%; margin-top: 5px; }
+    input[type="checkbox"] { width: 22px; height: 22px; accent-color: var(--accent); }
+    .toggle { display: flex; align-items: center; justify-content: center; gap: 6px; min-height: 46px; }
+    :focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+    fieldset { margin: 22px 0 12px; padding: 0; border: 0; }
+    legend { padding: 0; font-weight: 700; }
+    .count { margin: 18px 0 0; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>ポモドーロタイマー</h1>
+    <p id="phase">集中</p>
+    <div class="timer-face" id="timerFace">
+      <div id="remaining" role="timer" aria-label="残り時間">25:00</div>
+      <span class="timer-label" aria-hidden="true">残り時間</span>
+    </div>
+    <p id="status" role="status">開始を押すとタイマーが動きます。</p>
+    <div class="controls">
+      <button id="start" type="button">開始</button>
+      <button id="pause" type="button" disabled>一時停止</button>
+      <button id="reset" type="button">リセット</button>
+    </div>
+    <fieldset>
+      <legend>タイマー設定</legend>
+      <div class="settings">
+        <label>集中（分）<input id="focusMinutes" type="number" min="1" max="99" step="1" value="25" required></label>
+        <label>休憩（分）<input id="breakMinutes" type="number" min="1" max="99" step="1" value="5" required></label>
+      </div>
+    </fieldset>
+    <div class="sound">
+      <label class="toggle"><input id="soundEnabled" type="checkbox" role="switch" checked>通知音</label>
+      <button id="testSound" type="button">テスト音</button>
+    </div>
+    <p class="count">集中の完了回数 <strong id="count">0</strong> 回</p>
+  </main>
+  <script>
+    const get = (id) => document.getElementById(id);
+    const inputs = { focus: get('focusMinutes'), break: get('breakMinutes') };
+    const durations = { focus: 25, break: 5 };
+    const soundEnabled = get('soundEnabled');
+    let phase = 'focus';
+    let completed = 0;
+    let phaseDuration = duration();
+    let remaining = phaseDuration;
+    let deadline = null;
+    let interval = null;
+    let fresh = true;
+    let audioContext;
+
+    function duration() {
+      return durations[phase] * 60_000;
+    }
+
+    function render() {
+      const seconds = Math.ceil(remaining / 1000);
+      const format = (value) => String(value).padStart(2, '0');
+      get('remaining').textContent = format(Math.floor(seconds / 60)) + ':' + format(seconds % 60);
+      get('timerFace').style.setProperty('--progress', (remaining / phaseDuration * 100) + '%');
+      document.body.classList.toggle('break', phase === 'break');
+      get('phase').textContent = phase === 'focus' ? '集中' : '休憩';
+      get('count').textContent = completed;
+      get('start').disabled = deadline !== null;
+      get('pause').disabled = deadline === null;
+    }
+
+    function setStatus(message) {
+      get('status').textContent = message;
+    }
+
+    async function prepareAudio() {
+      try {
+        audioContext ??= new AudioContext();
+        if (audioContext.state !== 'running') await audioContext.resume();
+        return audioContext.state === 'running';
+      } catch {
+        return false;
+      }
+    }
+
+    function beep() {
+      if (audioContext?.state !== 'running') return;
+      const start = audioContext.currentTime;
+      const oscillator = audioContext.createOscillator();
+      const gain = audioContext.createGain();
+      oscillator.frequency.value = 740;
+      for (let pulse = 0; pulse < 5; pulse++) {
+        const onset = start + pulse * 0.7;
+        gain.gain.setValueAtTime(0, onset);
+        gain.gain.linearRampToValueAtTime(0.2, onset + 0.015);
+        gain.gain.setValueAtTime(0.2, onset + 0.14);
+        gain.gain.linearRampToValueAtTime(0, onset + 0.2);
+      }
+      oscillator.connect(gain).connect(audioContext.destination);
+      oscillator.start(start);
+      oscillator.stop(start + 3);
+    }
+
+    function tick() {
+      if (deadline === null) return;
+      const now = Date.now();
+      let changed = false;
+      while (now >= deadline) {
+        if (phase === 'focus') completed++;
+        phase = phase === 'focus' ? 'break' : 'focus';
+        phaseDuration = duration();
+        deadline += phaseDuration;
+        changed = true;
+      }
+      if (changed) {
+        setStatus(phase === 'break' ? '集中が終了しました。休憩を始めます。' : '休憩が終了しました。集中を始めます。');
+        if (soundEnabled.checked) beep();
+      }
+      remaining = deadline - now;
+      render();
+    }
+
+    function stop() {
+      clearInterval(interval);
+      deadline = null;
+    }
+
+    get('start').addEventListener('click', () => {
+      if (soundEnabled.checked) void prepareAudio();
+      fresh = false;
+      deadline = Date.now() + remaining;
+      interval = setInterval(tick, 200);
+      setStatus(phase === 'focus' ? '集中タイマーが動いています。' : '休憩タイマーが動いています。');
+      tick();
+    });
+
+    get('pause').addEventListener('click', () => {
+      tick();
+      stop();
+      setStatus('一時停止中です。');
+      render();
+    });
+
+    get('reset').addEventListener('click', () => {
+      stop();
+      phase = 'focus';
+      completed = 0;
+      phaseDuration = duration();
+      remaining = phaseDuration;
+      fresh = true;
+      setStatus('タイマーと完了回数をリセットしました。');
+      render();
+    });
+
+    for (const [kind, input] of Object.entries(inputs)) {
+      input.addEventListener('change', () => {
+        if (!input.validity.valid) {
+          input.value = durations[kind];
+          setStatus('分数は1〜99の整数で入力してください。');
+          return;
+        }
+        durations[kind] = input.valueAsNumber;
+        if (fresh && kind === phase) {
+          phaseDuration = duration();
+          remaining = phaseDuration;
+          render();
+          setStatus('分数を変更しました。');
+        } else {
+          setStatus('変更した分数は、次にこの区間が始まるときに適用されます。');
+        }
+      });
+    }
+
+    soundEnabled.addEventListener('change', () => {
+      get('testSound').disabled = !soundEnabled.checked;
+      if (soundEnabled.checked) void prepareAudio();
+    });
+
+    get('testSound').addEventListener('click', async () => {
+      if (await prepareAudio()) {
+        if (soundEnabled.checked) beep();
+      } else {
+        setStatus('このブラウザでは通知音を再生できませんでした。');
+      }
+    });
+
+    document.addEventListener('visibilitychange', tick);
+    render();
+  </script>
+</body>
+</html>
